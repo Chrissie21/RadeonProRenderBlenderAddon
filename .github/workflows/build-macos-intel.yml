@@ -1,0 +1,68 @@
+name: Blender 4.5 Intel Mac build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [build/blender-4.5-intel]
+    paths: ['.github/workflows/build-macos-intel.yml', 'cmd_tools/ci_smoke.py']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rpr-intel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.2'
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+      BLENDER_VERSION: '4.5.9'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+      - name: Install build tools
+        run: |
+          test "$(uname -m)" = x86_64
+          brew install castxml
+          python -m pip install 'cffi==1.17.1' 'numpy<3'
+          echo "SDKROOT=$(xcrun --show-sdk-path)" >> "$GITHUB_ENV"
+      - name: Prepare SDK and generate bindings
+        run: |
+          python cmd_tools/create_sdk.py
+          python src/bindings/pyrpr/src/pyrprapi.py "$(command -v castxml)"
+          test -f bindings-ok
+      - name: Build bindings and helper
+        run: python build.py
+      - name: Package installable add-on
+        working-directory: BlenderPkg
+        run: python create_zip_addon.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rprblender-blender-4.5.9-macos-intel-experimental
+          path: BlenderPkg/.build/*.zip
+          if-no-files-found: error
+          retention-days: 14
+      - name: Download exact Blender version
+        run: |
+          curl --fail --location --retry 3 "https://download.blender.org/release/Blender4.5/blender-${BLENDER_VERSION}-macos-x64.dmg" -o "$RUNNER_TEMP/blender.dmg"
+          hdiutil attach "$RUNNER_TEMP/blender.dmg" -nobrowse -mountpoint "$RUNNER_TEMP/blender-volume"
+          ditto "$RUNNER_TEMP/blender-volume/Blender.app" "$RUNNER_TEMP/Blender.app"
+          hdiutil detach "$RUNNER_TEMP/blender-volume"
+      - name: Verify packaged add-on in Blender 4.5.9
+        run: |
+          "$RUNNER_TEMP/Blender.app/Contents/MacOS/Blender" --background --factory-startup --python-exit-code 1 --python cmd_tools/ci_smoke.py
+      - name: Record limitations
+        if: always()
+        run: |
+          echo '### Intel Mac experimental build' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Based on upstream v3.6.12 for Blender 4.5 / Python 3.11. SDK native libraries are supplied by upstream, not rebuilt here. Deployment target applies to the helper compiled here; upstream library requirements still apply.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'A successful smoke check verifies add-on loading, not Radeon Pro 560 rendering or macOS 13 compatibility. Test the artifact on the target Mac before relying on it.' >> "$GITHUB_STEP_SUMMARY"
